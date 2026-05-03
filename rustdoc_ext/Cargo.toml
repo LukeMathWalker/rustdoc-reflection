@@ -1,0 +1,13 @@
+[package]
+name = "rustdoc_ext"
+description = "Extension traits for rustdoc-types"
+edition.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+version = "0.1.0"
+keywords = ["rustdoc-json", "reflection", "rustdoc"]
+
+[dependencies]
+guppy = { workspace = true }
+rustdoc-types = { workspace = true }

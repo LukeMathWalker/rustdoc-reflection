@@ -1,0 +1,39 @@
+name: Open a release PR
+
+permissions:
+  pull-requests: write
+  contents: write
+
+on:
+  workflow_dispatch:
+
+jobs:
+  release-plz:
+    name: release-plz release-pr
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub token
+        uses: actions/create-github-app-token@v2
+        id: generate-token
+        with:
+          app-id: ${{ secrets.RELEASER_APP_ID }}
+          private-key: ${{ secrets.RELEASER_PRIVATE_KEY }}
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ steps.generate-token.outputs.token }}
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Set git identity
+        run: |
+          git config --global user.name "rustdoc-reflection-releaser[bot]"
+          git config --global user.email "ci@rustdoc-reflection"
+      - name: Run release-plz
+        uses: MarcoIeni/release-plz-action@v0.5
+        with:
+          command: release-pr
+          project_manifest: Cargo.toml
+          config: .release-plz.toml
+        env:
+          GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
