@@ -14,10 +14,10 @@ homepage = "https://github.com/LukeMathWalker/rustdoc-reflection"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-rustdoc_ext = { path = "rustdoc_ext", version = "0.1.0" }
-rustdoc_ir = { path = "rustdoc_ir", version = "0.1.0" }
-rustdoc_processor = { path = "rustdoc_processor", version = "0.1.0" }
-rustdoc_resolver = { path = "rustdoc_resolver", version = "0.1.0" }
+rustdoc_ext = { path = "rustdoc_ext", version = "0.1.1" }
+rustdoc_ir = { path = "rustdoc_ir", version = "0.1.1" }
+rustdoc_processor = { path = "rustdoc_processor", version = "0.1.1" }
+rustdoc_resolver = { path = "rustdoc_resolver", version = "0.1.1" }
 
 rustdoc-types = { version = "0.57.3", features = ["rustc-hash", "rkyv_0_8"] }
 ahash = "0.8"
