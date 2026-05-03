@@ -15,7 +15,7 @@ jobs:
     name: release-plz release
     runs-on: ubuntu-latest
     # Only run on the merge commit that release-plz produces.
-    if: ${{ startsWith(github.event.head_commit.message, 'chore: release') }}
+    if: startsWith(github.event.head_commit.message, 'chore: release')
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
