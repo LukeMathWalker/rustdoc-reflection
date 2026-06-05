@@ -3,7 +3,8 @@
 //!
 //! The pipeline:
 //!
-//! 1. **Compute** ([`compute::compute_crate_docs`]): invoke `cargo rustdoc` to generate JSON docs.
+//! 1. **Compute** ([`compute::compute_crate_docs`]): invoke `cargo doc --output-format=json`
+//!    to generate JSON docs. Requires a nightly toolchain of `nightly-2026-06-04` or newer.
 //! 2. **Cache** ([`cache::RustdocGlobalFsCache`]): persist raw docs and secondary indexes
 //!    in a SQLite database at `{cache_dir}/{fingerprint}.db`.
 //! 3. **Index** ([`indexing`]): build secondary indexes — import paths, item lookups,
@@ -43,17 +44,14 @@ pub const TOOLCHAIN_CRATES: [&str; 3] = [
     ALLOC_PACKAGE_ID_REPR,
 ];
 
-/// Return the options to pass to `rustdoc` in order to generate JSON documentation.
+/// Return the options to pass to `rustdoc` via `RUSTDOCFLAGS` when invoking `cargo doc`.
 ///
-/// We isolate this logic in a separate function in order to be able to refer to these
-/// options from various places in the codebase and maintain a single source of truth.
+/// Most options that used to live here have moved to native `cargo doc` flags
+/// (`--document-private-items`, `--output-format=json`, `-Zunstable-options`). Only
+/// `--document-hidden-items` remains, because cargo doesn't expose a passthrough for it.
 ///
-/// In particular, they do affect our caching logic (see the `cache` module).
-pub(crate) fn rustdoc_options() -> [&'static str; 4] {
-    [
-        "--document-private-items",
-        "-Zunstable-options",
-        "-wjson",
-        "--document-hidden-items",
-    ]
+/// We isolate this logic in a function so that the cache fingerprint (see the `cache`
+/// module) reflects any future change to this list.
+pub(crate) fn rustdocflags() -> [&'static str; 1] {
+    ["--document-hidden-items"]
 }

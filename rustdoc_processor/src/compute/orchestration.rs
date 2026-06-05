@@ -15,7 +15,7 @@ use super::package_id_spec::PackageIdSpecification;
 use super::progress::ComputeProgress;
 use super::toolchain::get_toolchain_crate_docs;
 use crate::TOOLCHAIN_CRATES;
-use crate::rustdoc_options;
+use crate::rustdocflags;
 use crate::utils::normalize_crate_name;
 
 #[derive(Debug, thiserror::Error, Clone)]
@@ -127,30 +127,7 @@ where
     };
 
     let target_directory = package_graph.workspace().target_directory().as_std_path();
-    for (i, chunk) in chunks.into_iter().enumerate() {
-        if i > 0 {
-            // All crates in the later chunks have at least another crate with the same name
-            // in the dependency graph (otherwise they would have been in the first chunk).
-            // We need to clean up the target directory to make sure that `cargo` doesn't
-            // mistakenly believe that the JSON docs it generated for another version of
-            // the crate can be reused.
-            for (id, _) in &chunk {
-                let lib_name = lib_target_name(id, package_graph);
-                let _ = fs_err::remove_file(json_doc_location(&lib_name, target_directory));
-            }
-        } else {
-            // If it's the first chunk, we need to check package by package.
-            for (id, _) in &chunk {
-                let our_lib = lib_target_name(id, package_graph);
-                let has_duplicate = package_graph
-                    .packages()
-                    .any(|p| p.id() != id && lib_target_name(p.id(), package_graph) == our_lib);
-                if has_duplicate {
-                    let _ = fs_err::remove_file(json_doc_location(&our_lib, target_directory));
-                }
-            }
-        }
-
+    for chunk in chunks {
         let chunk_package_ids: Vec<_> = chunk.iter().map(|(id, _)| id.clone()).collect();
         progress.before_computing(package_graph, &chunk_package_ids);
         let timer = std::time::Instant::now();
@@ -166,15 +143,19 @@ where
 
         outcome?;
 
-        // It takes a while to deserialize the JSON output of `cargo rustdoc`, so we parallelize
+        // It takes a while to deserialize the JSON output of `cargo doc`, so we parallelize
         // that part.
         use rayon::prelude::{IntoParallelIterator, ParallelIterator};
         for (package_id, krate) in chunk
             .into_par_iter()
             .map(|(package_id, package_spec)| {
-                let lib_name = lib_target_name(&package_id, package_graph);
-                let krate =
-                    load_json_docs(target_directory, &lib_name, &package_spec, toolchain_name);
+                let krate = load_json_docs(
+                    target_directory,
+                    &package_id,
+                    package_graph,
+                    &package_spec,
+                    toolchain_name,
+                );
                 (package_id, krate)
             })
             .collect::<Vec<_>>()
@@ -196,59 +177,7 @@ where
 {
     let package_id_specs: Vec<_> = package_id_specs.collect();
     tracing::Span::current().record("package_id_specs", package_id_specs.iter().join(", "));
-    if package_id_specs.len() == 1 {
-        _compute_single_crate_docs(toolchain_name, package_id_specs[0], current_dir)
-    } else {
-        _compute_multiple_crate_docs(toolchain_name, package_id_specs, current_dir)
-    }
-}
 
-/// `cargo rustdoc` understands the structure of the expected output, so it won't
-/// regenerate the JSON if it's already there and the crate hasn't changed.
-/// Unfortunately, that's not the case for `cargo doc`, so we can't leverage the
-/// same benefits in both the single and multi-crate case using the same command.
-fn _compute_single_crate_docs(
-    toolchain_name: &str,
-    package_id_spec: &PackageIdSpecification,
-    current_dir: &Path,
-) -> Result<(), anyhow::Error> {
-    let mut cmd = std::process::Command::new("rustup");
-    cmd.arg("run")
-        .current_dir(current_dir)
-        .arg(toolchain_name)
-        .arg("cargo")
-        .arg("rustdoc")
-        .arg("-q")
-        .arg("--lib")
-        .arg("-p")
-        .arg(package_id_spec.to_string())
-        .arg("-Zunstable-options")
-        .arg("--output-format")
-        .arg("json")
-        .arg("--")
-        .arg("--document-private-items")
-        .arg("--document-hidden-items");
-
-    tracing::Span::current().record("cmd", tracing::field::debug(&cmd));
-
-    let status = cmd
-        .status()
-        .with_context(|| format!("Failed to run `cargo rustdoc`.\n{cmd:?}"))?;
-
-    if !status.success() {
-        anyhow::bail!(
-            "An invocation of `cargo rustdoc` exited with non-zero status code.\n{:?}",
-            cmd
-        );
-    }
-    Ok(())
-}
-
-fn _compute_multiple_crate_docs(
-    toolchain_name: &str,
-    package_id_specs: Vec<&PackageIdSpecification>,
-    current_dir: &Path,
-) -> Result<(), anyhow::Error> {
     let mut cmd = std::process::Command::new("rustup");
     cmd.arg("run")
         .current_dir(current_dir)
@@ -256,13 +185,15 @@ fn _compute_multiple_crate_docs(
         .arg("cargo")
         .arg("doc")
         .arg("--no-deps")
-        .arg("-q")
-        .arg("--lib");
+        .arg("--lib")
+        .arg("--output-format=json")
+        .arg("--document-private-items")
+        .arg("-q");
     for package_id_spec in &package_id_specs {
         cmd.arg("-p").arg(package_id_spec.to_string());
     }
-
-    cmd.env("RUSTDOCFLAGS", rustdoc_options().join(" "));
+    cmd.arg("-Zunstable-options");
+    cmd.env("RUSTDOCFLAGS", rustdocflags().join(" "));
 
     tracing::Span::current().record("cmd", tracing::field::debug(&cmd));
 
@@ -279,11 +210,113 @@ fn _compute_multiple_crate_docs(
     Ok(())
 }
 
-/// The path to the JSON file generated by `rustdoc`.
-fn json_doc_location(lib_name: &str, target_directory: &Path) -> PathBuf {
-    target_directory
-        .join("doc")
-        .join(format!("{}.json", normalize_crate_name(lib_name)))
+/// Locate the per-version JSON file produced by `cargo doc --output-format=json`.
+///
+/// With `cargo doc --output-format=json`, the JSON output is written to a per-version
+/// directory under the build dir: `<target>/debug/build/<package_name>-<HASH>/out/<lib_name>.json`.
+/// Distinct hashes for distinct versions, persisted across invocations — so duplicate-named
+/// crates don't clobber each other.
+///
+/// Multiple `<HASH>` directories can exist for the *same* version of a package (e.g., when
+/// different feature sets or build contexts produced separate fingerprints). To pick the right
+/// one we look at the sibling fingerprint files at
+/// `<target>/debug/.fingerprint/<package_name>-<HASH>/`:
+/// - `doc-lib-<lib_name>.json` carries the version in `local[0].Precalculated`; we keep only
+///   candidates whose version matches the one we want.
+/// - `invoked.timestamp`'s mtime says when cargo last touched that unit; among same-version
+///   candidates we take the freshest, i.e. the one cargo wrote in the most recent run.
+fn find_json_doc(
+    target_directory: &Path,
+    package_name: &str,
+    lib_name: &str,
+    expected_version: &Version,
+) -> Result<PathBuf, anyhow::Error> {
+    let debug_dir = target_directory.join("debug");
+    let build_dir = debug_dir.join("build");
+    let fingerprint_root = debug_dir.join(".fingerprint");
+    let lib_json_filename = format!("{lib_name}.json");
+    let fingerprint_filename = format!("doc-lib-{lib_name}.json");
+    let dir_prefix = format!("{package_name}-");
+
+    let mut candidates: Vec<(PathBuf, String)> = Vec::new();
+    let read_dir = fs_err::read_dir(&build_dir).with_context(|| {
+        format!(
+            "Failed to read cargo build directory at `{}`",
+            build_dir.display()
+        )
+    })?;
+    for entry in read_dir {
+        let entry = entry?;
+        let dir_name = entry.file_name().to_string_lossy().into_owned();
+        let Some(hash) = dir_name.strip_prefix(&dir_prefix) else {
+            continue;
+        };
+        let candidate = entry.path().join("out").join(&lib_json_filename);
+        if candidate.is_file() {
+            candidates.push((candidate, hash.to_owned()));
+        }
+    }
+
+    if candidates.is_empty() {
+        anyhow::bail!(
+            "No JSON output found for `{package_name}` (lib `{lib_name}`) under `{}`. \
+             Expected `cargo doc --output-format=json` to write to `<build>/<HASH>/out/{lib_name}.json`.",
+            build_dir.display()
+        );
+    }
+
+    let target_version = expected_version.to_string();
+    let mut matches: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for (candidate, hash) in candidates {
+        let fingerprint_dir = fingerprint_root.join(format!("{dir_prefix}{hash}"));
+        let Ok(file) = fs_err::File::open(fingerprint_dir.join(&fingerprint_filename)) else {
+            continue;
+        };
+        let Ok(fingerprint) = serde_json::from_reader::<_, DocFingerprint>(BufReader::new(file))
+        else {
+            continue;
+        };
+        if fingerprint
+            .local
+            .first()
+            .and_then(|l| l.precalculated.as_deref())
+            == Some(&target_version)
+        {
+            matches.push((candidate, fingerprint_dir));
+        }
+    }
+
+    match matches.len() {
+        0 => anyhow::bail!(
+            "No JSON output found for `{package_name}` v{expected_version} under `{}`. \
+             None of the build-dir entries had a fingerprint at `{}` matching that version.",
+            build_dir.display(),
+            fingerprint_root.display(),
+        ),
+        1 => Ok(matches.into_iter().next().unwrap().0),
+        _ => Ok(matches
+            .into_iter()
+            .max_by_key(|(_, fingerprint_dir)| {
+                fs_err::metadata(fingerprint_dir.join("invoked.timestamp"))
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH)
+            })
+            .unwrap()
+            .0),
+    }
+}
+
+/// Subset of cargo's fingerprint file at `.fingerprint/<pkg>-<HASH>/doc-lib-<lib>.json` —
+/// just enough to disambiguate multiple versions of the same crate.
+#[derive(Deserialize)]
+struct DocFingerprint {
+    local: Vec<DocFingerprintLocal>,
+}
+
+#[derive(Deserialize)]
+struct DocFingerprintLocal {
+    #[serde(rename = "Precalculated")]
+    precalculated: Option<String>,
 }
 
 #[tracing::instrument(
@@ -292,21 +325,30 @@ fn json_doc_location(lib_name: &str, target_directory: &Path) -> PathBuf {
         crate.name = package_id_spec.name,
         crate.version = format_optional_version(&package_id_spec.version),
         crate.source = package_id_spec.source,
-        crate.lib.name = lib_name,
     )
 )]
 fn load_json_docs(
     target_directory: &Path,
-    lib_name: &str,
+    package_id: &PackageId,
+    package_graph: &PackageGraph,
     package_id_spec: &PackageIdSpecification,
     toolchain_name: &str,
 ) -> Result<rustdoc_types::Crate, anyhow::Error> {
-    let json_path = json_doc_location(lib_name, target_directory);
+    let metadata = package_graph
+        .metadata(package_id)
+        .with_context(|| format!("`{}` doesn't appear in the package graph", package_id.repr()))?;
+    let lib_name = lib_target_name(package_id, package_graph);
+    let json_path = find_json_doc(
+        target_directory,
+        metadata.name(),
+        &lib_name,
+        metadata.version(),
+    )?;
 
     let span = tracing::trace_span!("Read and deserialize JSON output");
     let guard = span.enter();
     let file = fs_err::File::open(&json_path).context(
-        "Failed to open the file containing the output of a `cargo rustdoc` invocation.",
+        "Failed to open the file containing the output of a `cargo doc` invocation.",
     )?;
     let mut reader = BufReader::new(file);
     let mut deserializer = serde_json::Deserializer::from_reader(&mut reader);
@@ -335,7 +377,7 @@ fn load_json_docs(
 
             Err(e).with_context(|| {
                 format!(
-                    "Failed to deserialize the output of a `cargo rustdoc` invocation (`{}`)",
+                    "Failed to deserialize the output of a `cargo doc` invocation (`{}`)",
                     json_path.display()
                 )
             })
