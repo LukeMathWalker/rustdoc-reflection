@@ -14,7 +14,7 @@ use tracing_log_error::log_error;
 use super::checksum::checksum_crate;
 use super::entry::{CacheEntry, SecondaryIndexes, ThirdPartyCrateCacheKey};
 use super::utils::RkyvCowBytes;
-use crate::rustdoc_options;
+use crate::rustdocflags;
 
 use super::HydratedCacheEntry;
 
@@ -367,7 +367,7 @@ impl<'a> ThirdPartyCrateCacheKey<'a> {
             default_feature_is_enabled,
             // SQLite doesn't support arrays, so we have to serialize these two collections as strings.
             // This is well defined, since we sorted features and the order of options is well-defined.
-            rustdoc_options: rustdoc_options().join(" "),
+            rustdoc_options: rustdocflags().join(" "),
             active_named_features: active_named_features.join(" "),
         };
         Some(cache_key)
