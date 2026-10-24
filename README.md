@@ -1,3 +1,7 @@
+> [!IMPORTANT]
+> **`rustdoc-reflection` has moved to [LukeMathWalker/officina](https://github.com/LukeMathWalker/officina/tree/main/rustdoc-reflection).**
+> This repository is archived: development, issues and releases continue there. Its crates on crates.io are unaffected.
+
 # Compile-time Rust Reflection Toolkit, Powered By `rustdoc-json`
 
 Building blocks for analyzing Rust crates via [`rustdoc`'s JSON output](https://doc.rust-lang.org/nightly/nightly-rustc/rustdoc_json_types/).
